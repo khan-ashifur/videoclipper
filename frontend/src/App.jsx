@@ -7,6 +7,9 @@ function App() {
   const [clips, setClips] = useState([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
+  const [uploadedVideoTempPath, setUploadedVideoTempPath] = useState(null);
+  const [downloadingClipTitle, setDownloadingClipTitle] = useState(null);
+
 
   const handleUpload = async () => {
     if (!file) {
@@ -18,6 +21,9 @@ function App() {
     setError('');
     setTranscript('');
     setClips([]);
+    setUploadedVideoTempPath(null);
+    setDownloadingClipTitle(null);
+
 
     const formData = new FormData();
     formData.append('file', file);
@@ -31,6 +37,8 @@ function App() {
 
       const uploadData = await uploadResponse.json();
       if (!uploadResponse.ok) throw new Error(uploadData.error);
+
+      setUploadedVideoTempPath(uploadData.uploadedFilePath);
 
       console.log('Transcript received:', uploadData.fullTranscriptionData);
       setTranscript(uploadData.fullTranscriptionData.text);
@@ -47,8 +55,13 @@ function App() {
       const clipsData = await detectClipsResponse.json();
       if (!detectClipsResponse.ok) throw new Error(clipsData.error);
 
-      console.log('Detected clips:', clipsData.clips);
-      setClips(clipsData.clips);
+      const clipsWithPaths = clipsData.clips.map(clip => ({
+          ...clip,
+          originalVideoTempPath: uploadData.uploadedFilePath
+      }));
+
+      console.log('Detected clips:', clipsWithPaths);
+      setClips(clipsWithPaths);
 
     } catch (err) {
       console.error('Upload or clip detection error:', err.message);
@@ -57,6 +70,48 @@ function App() {
       setLoading(false);
     }
   };
+
+  const handleDownloadClip = async (clip) => {
+      if (downloadingClipTitle === clip.title) {
+          return;
+      }
+      if (!clip.originalVideoTempPath) {
+          alert('Original video path is missing. Cannot download clip.');
+          return;
+      }
+
+      setDownloadingClipTitle(clip.title);
+
+      try {
+          console.log(`Requesting backend to cut clip: "${clip.title}"`);
+          const response = await fetch('http://localhost:5000/cut-clip', {
+              method: 'POST',
+              headers: {
+                  'Content-Type': 'application/json',
+              },
+              body: JSON.stringify({
+                  originalVideoTempPath: clip.originalVideoTempPath,
+                  clipTitle: clip.title,
+                  startTimeSeconds: clip.startTimeSeconds,
+                  endTimeSeconds: clip.endTimeSeconds,
+              }),
+          });
+
+          const data = await response.json();
+          if (!response.ok) throw new Error(data.error || 'Failed to cut clip.');
+
+          console.log('Clip cutting successful. Download URL:', data.downloadUrl);
+          window.open(data.downloadUrl, '_blank');
+          alert(`"${clip.title}" clip is ready for download!`);
+
+      } catch (err) {
+          console.error('Error downloading clip:', err);
+          alert('Failed to download clip: ' + err.message);
+      } finally {
+          setDownloadingClipTitle(null);
+      }
+  };
+
 
   const formatTime = (seconds) => {
     if (isNaN(seconds) || seconds < 0) return '00:00';
@@ -89,6 +144,12 @@ function App() {
               <p>{clip.description}</p>
               <p>Start: {formatTime(clip.startTimeSeconds)} | End: {formatTime(clip.endTimeSeconds)}</p>
               <p>Reason: {clip.reason}</p>
+              <button
+                onClick={() => handleDownloadClip(clip)}
+                disabled={downloadingClipTitle === clip.title}
+              >
+                {downloadingClipTitle === clip.title ? 'Downloading...' : 'Download Clip'}
+              </button>
             </li>
           ))}
         </ul>

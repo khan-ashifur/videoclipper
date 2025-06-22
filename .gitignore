@@ -17,3 +17,6 @@ frontend/dist/
 
 # Logs
 *.log
+# Generated video clips
+uploads/
+clips/
