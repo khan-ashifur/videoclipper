@@ -4,11 +4,12 @@ import './App.css';
 function App() {
   const [file, setFile] = useState(null);
   const [transcript, setTranscript] = useState('');
-  const [clips, setClips] = useState([]);
+  const [clips, setClips] = useState([]); // This will now directly hold clips with download URLs
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
+  // uploadedVideoTempPath is still used to send to backend, but its primary purpose
+  // for frontend-triggered cutting is gone as cutting is now batched on backend.
   const [uploadedVideoTempPath, setUploadedVideoTempPath] = useState(null);
-  const [downloadingClipTitle, setDownloadingClipTitle] = useState(null);
 
 
   const handleUpload = async () => {
@@ -21,8 +22,7 @@ function App() {
     setError('');
     setTranscript('');
     setClips([]);
-    setUploadedVideoTempPath(null);
-    setDownloadingClipTitle(null);
+    setUploadedVideoTempPath(null); // Clear previous path for new upload
 
 
     const formData = new FormData();
@@ -38,80 +38,47 @@ function App() {
       const uploadData = await uploadResponse.json();
       if (!uploadResponse.ok) throw new Error(uploadData.error);
 
+      // Store the temporary path from backend's /upload response
       setUploadedVideoTempPath(uploadData.uploadedFilePath);
 
       console.log('Transcript received:', uploadData.fullTranscriptionData);
       setTranscript(uploadData.fullTranscriptionData.text);
 
-      console.log('Requesting clip detection...');
+      console.log('Requesting clip detection and batch cutting...');
+      // Frontend now sends full transcription data AND the temporary video path
       const detectClipsResponse = await fetch('http://localhost:5000/detect-clips', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
         },
-        body: JSON.stringify({ fullTranscriptionData: uploadData.fullTranscriptionData }),
+        body: JSON.stringify({
+            fullTranscriptionData: uploadData.fullTranscriptionData,
+            originalVideoTempPath: uploadData.uploadedFilePath // Send the path for backend to cut
+        }),
       });
 
       const clipsData = await detectClipsResponse.json();
       if (!detectClipsResponse.ok) throw new Error(clipsData.error);
 
-      const clipsWithPaths = clipsData.clips.map(clip => ({
-          ...clip,
-          originalVideoTempPath: uploadData.uploadedFilePath
-      }));
-
-      console.log('Detected clips:', clipsWithPaths);
-      setClips(clipsWithPaths);
+      console.log('Detected and (attempted) cut clips:', clipsData.clips);
+      setClips(clipsData.clips); // Clips now directly contain download URLs
 
     } catch (err) {
-      console.error('Upload or clip detection error:', err.message);
+      console.error('Upload or clip processing error:', err.message);
       setError(err.message);
     } finally {
       setLoading(false);
     }
   };
 
-  const handleDownloadClip = async (clip) => {
-      if (downloadingClipTitle === clip.title) {
-          return;
-      }
-      if (!clip.originalVideoTempPath) {
-          alert('Original video path is missing. Cannot download clip.');
-          return;
-      }
-
-      setDownloadingClipTitle(clip.title);
-
-      try {
-          console.log(`Requesting backend to cut clip: "${clip.title}"`);
-          const response = await fetch('http://localhost:5000/cut-clip', {
-              method: 'POST',
-              headers: {
-                  'Content-Type': 'application/json',
-              },
-              body: JSON.stringify({
-                  originalVideoTempPath: clip.originalVideoTempPath,
-                  clipTitle: clip.title,
-                  startTimeSeconds: clip.startTimeSeconds,
-                  endTimeSeconds: clip.endTimeSeconds,
-              }),
-          });
-
-          const data = await response.json();
-          if (!response.ok) throw new Error(data.error || 'Failed to cut clip.');
-
-          console.log('Clip cutting successful. Download URL:', data.downloadUrl);
-          window.open(data.downloadUrl, '_blank');
-          alert(`"${clip.title}" clip is ready for download!`);
-
-      } catch (err) {
-          console.error('Error downloading clip:', err);
-          alert('Failed to download clip: ' + err.message);
-      } finally {
-          setDownloadingClipTitle(null);
+  // Simplified handleDownloadClip: now just opens the URL
+  const handleDownloadClip = (clip) => {
+      if (clip.downloadUrl) {
+          window.open(clip.downloadUrl, '_blank');
+      } else {
+          alert('Download URL not available for this clip.');
       }
   };
-
 
   const formatTime = (seconds) => {
     if (isNaN(seconds) || seconds < 0) return '00:00';
@@ -126,10 +93,10 @@ function App() {
 
       <input type="file" accept="video/*" onChange={(e) => setFile(e.target.files[0])} disabled={loading} />
       <button onClick={handleUpload} disabled={loading}>
-        {loading ? 'Processing...' : 'Upload & Detect Clips'}
+        {loading ? 'Processing...' : 'Upload & Auto-Cut Clips'}
       </button>
 
-      {loading && <p>Processing... please wait.</p>}
+      {loading && <p>Processing... please wait. This might take a moment for longer videos.</p>}
       {error && <p style={{ color: 'red' }}>Error: {error}</p>}
 
       <h2>Transcript:</h2>
@@ -144,18 +111,18 @@ function App() {
               <p>{clip.description}</p>
               <p>Start: {formatTime(clip.startTimeSeconds)} | End: {formatTime(clip.endTimeSeconds)}</p>
               <p>Reason: {clip.reason}</p>
-              <button
-                onClick={() => handleDownloadClip(clip)}
-                disabled={downloadingClipTitle === clip.title}
-              >
-                {downloadingClipTitle === clip.title ? 'Downloading...' : 'Download Clip'}
-              </button>
+              {clip.downloadUrl ? (
+                  <button onClick={() => handleDownloadClip(clip)}>Download Clip</button>
+              ) : (
+                  <p style={{ color: 'orange' }}>Clip cut failed or URL not available.</p>
+              )}
             </li>
           ))}
         </ul>
       ) : (
-        !loading && <p>No clips detected yet.</p>
+        !loading && transcript && <p>No clips detected or cut yet. Try a different video?</p>
       )}
+      {!loading && !transcript && <p>Upload a video to see transcripts and auto-cut clips.</p>}
     </div>
   );
 }
