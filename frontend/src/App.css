@@ -1,0 +1,37 @@
+.app {
+  text-align: center;
+  font-family: Arial, sans-serif;
+  padding: 20px;
+  max-width: 600px;
+  margin: auto;
+}
+
+h1 {
+  font-size: 28px;
+  margin-bottom: 20px;
+}
+
+input[type="file"] {
+  margin: 10px;
+}
+
+button {
+  padding: 10px 20px;
+  margin: 10px;
+  font-size: 16px;
+  cursor: pointer;
+}
+
+textarea {
+  width: 100%;
+  margin-top: 10px;
+}
+
+ul {
+  text-align: left;
+  margin-top: 10px;
+}
+
+li {
+  margin-bottom: 8px;
+}
