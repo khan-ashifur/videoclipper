@@ -1,0 +1,19 @@
+# Node dependencies
+node_modules/
+
+# dotenv
+.env
+backend/.env
+frontend/.env
+
+# Multer upload folder
+backend/uploads/
+
+# Vite build output
+frontend/dist/
+
+# VSCode settings
+.vscode/
+
+# Logs
+*.log
