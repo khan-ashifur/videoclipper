@@ -268,8 +268,8 @@ app.post('/detect-clips', async (req, res) => {
                 { role: 'user', content: chunkPrompt }
             ],
             response_format: { type: 'json_object' },
-            temperature: 0.7, // Keep lower for chunk processing, focus on distinct highlights
-            max_tokens: 1000 // Smaller response for individual clips
+            temperature: 0.7,
+            max_tokens: 1000
         };
 
         try {
@@ -281,45 +281,40 @@ app.post('/detect-clips', async (req, res) => {
                         'Authorization': `Bearer ${process.env.OPENAI_API_KEY}`,
                         'Content-Type': 'application/json',
                     },
-                    timeout: 1 * 60 * 1000 // 1 minute timeout for each chunk's GPT call
+                    timeout: 1 * 60 * 1000
                 }
             );
             const rawChunkOutput = gptChunkResponse.data.choices[0].message.content;
             console.log(`Raw GPT Output for chunk ${index + 1}:`, rawChunkOutput);
 
             let jsonString = rawChunkOutput;
-            // --- FIX START: Robustly handle null/empty/malformed rawChunkOutput ---
             if (rawChunkOutput === null || rawChunkOutput === undefined || rawChunkOutput.trim() === '') {
                 console.warn(`Raw GPT Output for chunk ${index + 1} was null, undefined or empty. Treating as empty array.`);
-                jsonString = "[]"; // Assign empty array string if output is null/empty
+                jsonString = "[]";
             } else {
-                const jsonRegex = /\[\s*\{[\s\S]*\}\s*\]/; // Regex to find array of objects
+                const jsonRegex = /\[\s*\{[\s\S]*\}\s*\]/;
                 const match = rawChunkOutput.match(jsonRegex);
                 if (match && match[0]) {
                     jsonString = match[0];
                     console.log("Extracted JSON string using regex for chunk.");
                 } else {
                     console.warn("Regex failed to extract JSON array for chunk. Attempting to parse raw output directly.");
-                    // Fallback to rawOutput, but JSON.parse might still fail if badly malformed
                 }
             }
             
-            let parsedChunkClips = []; // Initialize as empty array
+            let parsedChunkClips = [];
             try {
                 parsedChunkClips = JSON.parse(jsonString);
             } catch (parseErr) {
                 console.error(`JSON parse error for chunk ${index + 1}:`, parseErr.message, `\nProblematic string:`, jsonString);
-                // On parse error, it remains an empty array, which is handled correctly by subsequent filters.
             }
-            // --- FIX END ---
 
             if (!Array.isArray(parsedChunkClips)) {
-                // Check if it's a single object (if GPT returns that) and convert to array
                 if (typeof parsedChunkClips === 'object' && parsedChunkClips !== null && parsedChunkClips.title) {
                     parsedChunkClips = [parsedChunkClips];
                     console.log(`Chunk ${index+1}: GPT returned a single valid clip object, wrapping it in an array.`);
                 } else {
-                    parsedChunkClips = []; // Ensure it's an array for consistency if non-compliant object
+                    parsedChunkClips = [];
                 }
             }
 
@@ -331,6 +326,7 @@ app.post('/detect-clips', async (req, res) => {
                 typeof clip.endTimeSeconds === 'number' &&
                 typeof clip.reason === 'string' &&
                 clip.startTimeSeconds < clip.endTimeSeconds &&
+                // Original filtering for min/max duration (this applies to clips from chunks)
                 (clip.endTimeSeconds - clip.startTimeSeconds) >= targetMinDuration &&
                 (clip.endTimeSeconds - clip.startTimeSeconds) <= targetMaxDuration &&
                 // Ensure times are within the chunk bounds (optional, but good for sanity)
@@ -347,13 +343,11 @@ app.post('/detect-clips', async (req, res) => {
 
     const uniqueClips = [];
     const seenStartTimes = new Set();
-    const overlapThreshold = 5; // seconds
+    const overlapThreshold = 5;
 
     for (const clip of allDetectedClipsFromChunks) {
         let isDuplicate = false;
-        // Check for strong overlap with existing unique clips
         for (const existingUniqueClip of uniqueClips) {
-            // If start times are very close, or if the new clip is almost entirely contained within an existing one
             if (Math.abs(clip.startTimeSeconds - existingUniqueClip.startTimeSeconds) < overlapThreshold ||
                 (clip.startTimeSeconds >= existingUniqueClip.startTimeSeconds && clip.endTimeSeconds <= existingUniqueClip.endTimeSeconds + overlapThreshold)) {
                 isDuplicate = true;
@@ -374,14 +368,14 @@ app.post('/detect-clips', async (req, res) => {
     if (clipOption === 'userChoice') {
         userDesiredCount = desiredClipCount === 'max' ? uniqueClips.length : parseInt(desiredClipCount);
     } else { // aiPick
-        userDesiredCount = Math.min(uniqueClips.length, 3); // AI pick default up to 3
+        userDesiredCount = Math.min(uniqueClips.length, 3);
     }
 
 
     finalSelectedClips = [];
     let currentCandidates = [...uniqueClips]; 
 
-    // Apply duration filter again before selection
+    // Apply duration filter again before selection (important for user choice)
     currentCandidates = currentCandidates.filter(clip =>
         (clip.endTimeSeconds - clip.startTimeSeconds) >= targetMinDuration &&
         (clip.endTimeSeconds - clip.startTimeSeconds) <= targetMaxDuration
@@ -390,66 +384,120 @@ app.post('/detect-clips', async (req, res) => {
 
 
     if (userDesiredCount > 0 && currentCandidates.length >= userDesiredCount) {
-        // If we have enough candidates, just take the top N
         finalSelectedClips = currentCandidates.slice(0, userDesiredCount);
         console.log(`Exactly ${finalSelectedClips.length} clips selected to match user desired count.`);
     } else if (userDesiredCount > 0 && currentCandidates.length < userDesiredCount && currentCandidates.length > 0) {
-        // If not enough candidates, but some exist, take all available and attempt to split longest ones
-        console.log(`Not enough unique candidates (${currentCandidates.length}) for user's desired count (${userDesiredCount}). Attempting to split existing clips.`);
+        console.log(`Not enough unique candidates (${currentCandidates.length}) for user's desired count (${userDesiredCount}). Attempting to create more clips by splitting/padding.`);
         
         let tempClips = [...currentCandidates];
-        let attempts = 0;
-        const MAX_SPLIT_ATTEMPTS = userDesiredCount * 2; 
+        // --- NEW LOGIC START: More robust splitting and padding ---
+        // Fill up to desired count by splitting longest valid clips
+        let currentSplitAttempts = 0;
+        const maxTotalSplitAttempts = userDesiredCount * 3; // Prevent infinite loops
 
-        while (tempClips.length < userDesiredCount && attempts < MAX_SPLIT_ATTEMPTS) {
+        // First pass: try to split existing longer clips
+        while (tempClips.length < userDesiredCount && currentSplitAttempts < maxTotalSplitAttempts) {
             const splittableClips = tempClips.filter(c => 
-                (c.endTimeSeconds - c.startTimeSeconds) >= (targetMinDuration * 2) + 5 // Needs to be at least twice min duration + buffer to split
-            ).sort((a, b) => (b.endTimeSeconds - b.startTimeSeconds) - (a.endTimeSeconds - a.startTimeSeconds));
+                (c.endTimeSeconds - c.startTimeSeconds) >= (targetMinDuration * 1.5) // Clip needs to be at least 1.5x target min to split meaningfully
+            ).sort((a, b) => (b.endTimeSeconds - b.startTimeSeconds) - (a.endTimeSeconds - a.startTimeSeconds)); // Longest first
 
             if (splittableClips.length === 0) {
-                console.log("No more splittable clips found to reach desired count.");
+                console.log("No more splittable clips found in first pass.");
                 break;
             }
 
             const clipToSplit = splittableClips[0];
             const originalIndex = tempClips.indexOf(clipToSplit);
             
-            const midpoint = clipToSplit.startTimeSeconds + Math.floor((clipToSplit.endTimeSeconds - clipToSplit.startTimeSeconds) / 2);
+            const splitDuration = (clipToSplit.endTimeSeconds - clipToSplit.startTimeSeconds) / 2;
+            const midpoint = clipToSplit.startTimeSeconds + splitDuration;
             
             const firstHalf = {
                 ...clipToSplit,
-                title: `${clipToSplit.title} (Part 1)`,
+                title: `${clipToSplit.title} (Part A)`,
                 endTimeSeconds: midpoint,
-                reason: `${clipToSplit.reason} (Split for user count)`
+                reason: `${clipToSplit.reason} (Split to meet count)`
             };
             const secondHalf = {
                 ...clipToSplit,
-                title: `${clipToSplit.title} (Part 2)`,
+                title: `${clipToSplit.title} (Part B)`,
                 startTimeSeconds: midpoint,
-                reason: `${clipToSplit.reason} (Split for user count)`
+                reason: `${clipToSplit.reason} (Split to meet count)`
             };
 
             const newHalves = [];
-            // Ensure split halves meet a minimum duration to be useful
+            // Ensure split halves are at least half the target min duration to be useful
             if ((firstHalf.endTimeSeconds - firstHalf.startTimeSeconds) >= targetMinDuration / 2) newHalves.push(firstHalf);
             if ((secondHalf.endTimeSeconds - secondHalf.startTimeSeconds) >= targetMinDuration / 2) newHalves.push(secondHalf);
 
             if (newHalves.length > 0) {
                 tempClips.splice(originalIndex, 1, ...newHalves);
-                tempClips.sort((a, b) => a.startTimeSeconds - b.startTimeSeconds);
-                console.log(`Split clip "${clipToSplit.title}" into two. New clip count: ${tempClips.length}`);
+                tempClips.sort((a, b) => a.startTimeSeconds - b.startTimeSeconds); // Re-sort
+                console.log(`Split clip "${clipToSplit.title}" into two. Current tempClips count: ${tempClips.length}`);
             } else {
-                tempClips.splice(originalIndex, 1);
-                console.log(`Attempted to split "${clipToSplit.title}" but new halves too short. Removed original.`);
+                tempClips.splice(originalIndex, 1); // Remove if couldn't split meaningfully
+                console.log(`Attempted to split "${clipToSplit.title}" but halves too short. Removed original.`);
             }
-            attempts++;
+            currentSplitAttempts++;
         }
-        finalSelectedClips = tempClips.slice(0, userDesiredCount);
-        console.log(`Final selected clips after splitting attempts: ${finalSelectedClips.length}`);
+        
+        // Second pass: If still not enough, create simple sequential clips from remaining transcript
+        // This is a fallback to guarantee count, even if not "AI-picked" highlights
+        if (tempClips.length < userDesiredCount && totalVideoDuration > 0) {
+            console.log(`Still need more clips. Current: ${tempClips.length}, Desired: ${userDesiredCount}. Creating sequential filler clips.`);
+            let lastEndTime = 0;
+            if (tempClips.length > 0) {
+                lastEndTime = tempClips[tempClips.length - 1].endTimeSeconds;
+            } else if (segments.length > 0) { // If no clips generated at all, start from beginning
+                lastEndTime = segments[0].start;
+            }
+
+            while (tempClips.length < userDesiredCount && lastEndTime < totalVideoDuration) {
+                let newClipStartTime = lastEndTime;
+                let newClipEndTime = Math.min(newClipStartTime + desiredClipDuration, totalVideoDuration);
+
+                // Find the nearest segment boundary for cleaner cuts
+                if (segments.length > 0) {
+                    const segmentStart = segments.find(s => s.start >= newClipStartTime && s.start < newClipEndTime);
+                    if (segmentStart) newClipStartTime = segmentStart.start;
+
+                    const segmentEnd = segments.find(s => s.end >= newClipEndTime);
+                    if (segmentEnd) newClipEndTime = segmentEnd.end;
+                    else newClipEndTime = totalVideoDuration; // If no end segment found, go to end of video
+                }
+                
+                // Ensure duration is reasonable, if not, break
+                if (newClipEndTime - newClipStartTime < targetMinDuration / 2) { // Minimum 5s for filler
+                    console.log("Remaining duration too short for meaningful filler clip. Breaking.");
+                    break;
+                }
+
+                tempClips.push({
+                    title: `Auto-Generated Clip ${tempClips.length + 1}`,
+                    description: `Automatically generated segment from video.`,
+                    startTimeSeconds: newClipStartTime,
+                    endTimeSeconds: newClipEndTime,
+                    reason: "Automatically generated to meet user's clip count request."
+                });
+                lastEndTime = newClipEndTime;
+                console.log(`Created filler clip. New tempClips count: ${tempClips.length}`);
+
+                // Prevent infinite loop in very short/problematic videos
+                if (lastEndTime >= totalVideoDuration && tempClips.length < userDesiredCount) {
+                    console.log("Reached end of video, cannot generate more filler clips.");
+                    break;
+                }
+            }
+        }
+        finalSelectedClips = tempClips.slice(0, userDesiredCount); // Final slice to desired count
+        console.log(`Final selected clips after all splitting/padding attempts: ${finalSelectedClips.length}`);
 
     } else if (userDesiredCount > 0 && currentCandidates.length === 0) {
-        console.warn(`User desired ${userDesiredCount} clips, but no candidates found from any chunk.`);
+        // If user desires clips but none found even after chunking/GPT, and no auto-generation can occur
+        console.warn(`User desired ${userDesiredCount} clips, but no candidates found from any chunk. Cannot generate filler clips.`);
+        finalSelectedClips = []; // Explicitly ensure empty array
     } else {
+        // If userDesiredCount is 0 or no specific number requested, take all unique
         finalSelectedClips = currentCandidates;
     }
 
@@ -469,7 +517,6 @@ app.post('/detect-clips', async (req, res) => {
 
     if (finalSelectedClips.length === 0 && userDesiredCount > 0) {
       console.warn("Despite all efforts, no valid clips could be generated or parsed to meet user request.");
-      // Optionally, add a dummy clip or a specific message here if needed for frontend feedback
     }
 
 
