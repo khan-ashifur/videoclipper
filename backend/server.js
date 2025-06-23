@@ -328,8 +328,7 @@ app.post('/detect-clips', async (req, res) => {
                 clip.startTimeSeconds < clip.endTimeSeconds &&
                 // Original filtering for min/max duration (this applies to clips from chunks)
                 (clip.endTimeSeconds - clip.startTimeSeconds) >= targetMinDuration &&
-                (clip.endTimeSeconds - clip.startTimeSeconds) <= targetMaxDuration &&
-                // Ensure times are within the chunk bounds (optional, but good for sanity)
+                (clip.endTimeSeconds - clip.startTimeSeconds) <= targetMaxDuration && // Corrected this line
                 clip.startTimeSeconds >= chunk.startTime && clip.endTimeSeconds <= chunk.endTime
             );
             allDetectedClipsFromChunks.push(...parsedChunkClips);
@@ -356,8 +355,7 @@ app.post('/detect-clips', async (req, res) => {
         }
         if (!isDuplicate) {
             uniqueClips.push(clip);
-        } else {
-            console.log(`Skipping potential duplicate clip: "${clip.title}" starting at ${clip.startTimeSeconds.toFixed(2)}s`);
+            seenStartTimes.add(clip.startTimeSeconds);
         }
     }
     console.log(`Found ${uniqueClips.length} truly unique clips after chunk processing.`);
@@ -375,7 +373,7 @@ app.post('/detect-clips', async (req, res) => {
     finalSelectedClips = [];
     let currentCandidates = [...uniqueClips]; 
 
-    // Apply duration filter again before selection (important for user choice)
+    // Apply duration filter again before selection
     currentCandidates = currentCandidates.filter(clip =>
         (clip.endTimeSeconds - clip.startTimeSeconds) >= targetMinDuration &&
         (clip.endTimeSeconds - clip.startTimeSeconds) <= targetMaxDuration
@@ -390,16 +388,13 @@ app.post('/detect-clips', async (req, res) => {
         console.log(`Not enough unique candidates (${currentCandidates.length}) for user's desired count (${userDesiredCount}). Attempting to create more clips by splitting/padding.`);
         
         let tempClips = [...currentCandidates];
-        // --- NEW LOGIC START: More robust splitting and padding ---
-        // Fill up to desired count by splitting longest valid clips
         let currentSplitAttempts = 0;
-        const maxTotalSplitAttempts = userDesiredCount * 3; // Prevent infinite loops
+        const MAX_SPLIT_ATTEMPTS = userDesiredCount * 3; 
 
-        // First pass: try to split existing longer clips
         while (tempClips.length < userDesiredCount && currentSplitAttempts < maxTotalSplitAttempts) {
             const splittableClips = tempClips.filter(c => 
-                (c.endTimeSeconds - c.startTimeSeconds) >= (targetMinDuration * 1.5) // Clip needs to be at least 1.5x target min to split meaningfully
-            ).sort((a, b) => (b.endTimeSeconds - b.startTimeSeconds) - (a.endTimeSeconds - a.startTimeSeconds)); // Longest first
+                (c.endTimeSeconds - c.startTimeSeconds) >= (targetMinDuration * 1.5) + 5
+            ).sort((a, b) => (b.endTimeSeconds - b.startTimeSeconds) - (a.endTimeSeconds - a.startTimeSeconds));
 
             if (splittableClips.length === 0) {
                 console.log("No more splittable clips found in first pass.");
@@ -426,29 +421,26 @@ app.post('/detect-clips', async (req, res) => {
             };
 
             const newHalves = [];
-            // Ensure split halves are at least half the target min duration to be useful
             if ((firstHalf.endTimeSeconds - firstHalf.startTimeSeconds) >= targetMinDuration / 2) newHalves.push(firstHalf);
             if ((secondHalf.endTimeSeconds - secondHalf.startTimeSeconds) >= targetMinDuration / 2) newHalves.push(secondHalf);
 
             if (newHalves.length > 0) {
                 tempClips.splice(originalIndex, 1, ...newHalves);
-                tempClips.sort((a, b) => a.startTimeSeconds - b.startTimeSeconds); // Re-sort
+                tempClips.sort((a, b) => a.startTimeSeconds - b.startTimeSeconds);
                 console.log(`Split clip "${clipToSplit.title}" into two. Current tempClips count: ${tempClips.length}`);
             } else {
-                tempClips.splice(originalIndex, 1); // Remove if couldn't split meaningfully
-                console.log(`Attempted to split "${clipToSplit.title}" but halves too short. Removed original.`);
+                tempClips.splice(originalIndex, 1);
+                console.log(`Attempted to split "${clipToSplit.title}" but new halves too short. Removed original.`);
             }
             currentSplitAttempts++;
         }
         
-        // Second pass: If still not enough, create simple sequential clips from remaining transcript
-        // This is a fallback to guarantee count, even if not "AI-picked" highlights
         if (tempClips.length < userDesiredCount && totalVideoDuration > 0) {
-            console.log(`Still need more clips. Current: ${tempClips.length}, Desired: ${userDesiredCount}. Creating sequential filler clips.`);
+            console.log(`Still need more clips after splitting existing. Current: ${tempClips.length}, Desired: ${userDesiredCount}. Creating sequential filler clips.`);
             let lastEndTime = 0;
             if (tempClips.length > 0) {
                 lastEndTime = tempClips[tempClips.length - 1].endTimeSeconds;
-            } else if (segments.length > 0) { // If no clips generated at all, start from beginning
+            } else if (segments.length > 0) {
                 lastEndTime = segments[0].start;
             }
 
@@ -456,52 +448,86 @@ app.post('/detect-clips', async (req, res) => {
                 let newClipStartTime = lastEndTime;
                 let newClipEndTime = Math.min(newClipStartTime + desiredClipDuration, totalVideoDuration);
 
-                // Find the nearest segment boundary for cleaner cuts
-                if (segments.length > 0) {
-                    const segmentStart = segments.find(s => s.start >= newClipStartTime && s.start < newClipEndTime);
-                    if (segmentStart) newClipStartTime = segmentStart.start;
+                const nearestSegmentStart = segments.find(s => s.start >= newClipStartTime);
+                if (nearestSegmentStart && nearestSegmentStart.start < newClipEndTime + (targetMinDuration/2)) {
+                    newClipStartTime = nearestSegmentStart.start;
+                }
 
-                    const segmentEnd = segments.find(s => s.end >= newClipEndTime);
-                    if (segmentEnd) newClipEndTime = segmentEnd.end;
-                    else newClipEndTime = totalVideoDuration; // If no end segment found, go to end of video
+                const nearestSegmentEnd = segments.find(s => s.end >= newClipEndTime);
+                if (nearestSegmentEnd && nearestSegmentEnd.end > newClipStartTime && nearestSegmentEnd.end < newClipEndTime + (targetMinDuration/2)) {
+                    newClipEndTime = nearestSegmentEnd.end;
+                } else {
+                    newClipEndTime = Math.min(newClipStartTime + desiredClipDuration, totalVideoDuration);
                 }
                 
-                // Ensure duration is reasonable, if not, break
-                if (newClipEndTime - newClipStartTime < targetMinDuration / 2) { // Minimum 5s for filler
-                    console.log("Remaining duration too short for meaningful filler clip. Breaking.");
+                if (newClipEndTime - newClipStartTime < targetMinDuration / 2 && tempClips.length > 0) {
+                    break;
+                }
+                if (newClipEndTime - newClipStartTime < 2 && tempClips.length === 0 && userDesiredCount > 0) {
+                    break;
+                }
+
+
+                tempClips.push({
+                    title: `Auto-Generated Clip ${tempClips.length + 1}`,
+                    description: `Automatically generated segment from video (no AI-picked highlights found).`,
+                    startTimeSeconds: newClipStartTime,
+                    endTimeSeconds: newClipEndTime,
+                    reason: "Automatically generated to meet user's clip count request; no AI highlights found."
+                });
+                lastEndTime = newClipEndTime;
+                if (lastEndTime >= totalVideoDuration) break;
+            }
+        }
+        finalSelectedClips = tempClips.slice(0, userDesiredCount);
+        console.log(`Final selected clips after all splitting/padding attempts: ${finalSelectedClips.length}`);
+
+    } else if (userDesiredCount > 0 && currentCandidates.length === 0) {
+        console.warn(`User desired ${userDesiredCount} clips, but no candidates found from any chunk.`);
+        if (totalVideoDuration > 0) {
+            console.log("Attempting to create filler clips from scratch as no candidates found.");
+            let tempClips = [];
+            let lastEndTime = segments[0]?.start || 0;
+            while (tempClips.length < userDesiredCount && lastEndTime < totalVideoDuration) {
+                let newClipStartTime = lastEndTime;
+                let newClipEndTime = Math.min(newClipStartTime + desiredClipDuration, totalVideoDuration);
+
+                const nearestSegmentStart = segments.find(s => s.start >= newClipStartTime);
+                if (nearestSegmentStart && nearestSegmentStart.start < newClipEndTime + (targetMinDuration/2)) {
+                    newClipStartTime = nearestSegmentStart.start;
+                }
+
+                const nearestSegmentEnd = segments.find(s => s.end >= newClipEndTime);
+                if (nearestSegmentEnd && nearestSegmentEnd.end > newClipStartTime && nearestSegmentEnd.end < newClipEndTime + (targetMinDuration/2)) {
+                    newClipEndTime = nearestSegmentEnd.end;
+                } else {
+                    newClipEndTime = Math.min(newClipStartTime + desiredClipDuration, totalVideoDuration);
+                }
+                
+                if (newClipEndTime - newClipStartTime < targetMinDuration / 2 && tempClips.length > 0) {
+                    break;
+                }
+                if (newClipEndTime - newClipStartTime < 2 && tempClips.length === 0 && userDesiredCount > 0) {
                     break;
                 }
 
                 tempClips.push({
                     title: `Auto-Generated Clip ${tempClips.length + 1}`,
-                    description: `Automatically generated segment from video.`,
+                    description: `Automatically generated segment from video (no AI-picked highlights found).`,
                     startTimeSeconds: newClipStartTime,
                     endTimeSeconds: newClipEndTime,
-                    reason: "Automatically generated to meet user's clip count request."
+                    reason: "Automatically generated to meet user's clip count request; no AI highlights found."
                 });
                 lastEndTime = newClipEndTime;
-                console.log(`Created filler clip. New tempClips count: ${tempClips.length}`);
-
-                // Prevent infinite loop in very short/problematic videos
-                if (lastEndTime >= totalVideoDuration && tempClips.length < userDesiredCount) {
-                    console.log("Reached end of video, cannot generate more filler clips.");
-                    break;
-                }
+                if (lastEndTime >= totalVideoDuration) break;
             }
+            finalSelectedClips = tempClips.slice(0, userDesiredCount);
+            console.log(`Generated ${finalSelectedClips.length} filler clips from scratch.`);
         }
-        finalSelectedClips = tempClips.slice(0, userDesiredCount); // Final slice to desired count
-        console.log(`Final selected clips after all splitting/padding attempts: ${finalSelectedClips.length}`);
-
-    } else if (userDesiredCount > 0 && currentCandidates.length === 0) {
-        // If user desires clips but none found even after chunking/GPT, and no auto-generation can occur
-        console.warn(`User desired ${userDesiredCount} clips, but no candidates found from any chunk. Cannot generate filler clips.`);
-        finalSelectedClips = []; // Explicitly ensure empty array
     } else {
-        // If userDesiredCount is 0 or no specific number requested, take all unique
         finalSelectedClips = currentCandidates;
     }
 
-    // Final validity filter before sending to frontend/cutting
     finalSelectedClips = finalSelectedClips.filter(clip =>
         typeof clip === 'object' && clip !== null &&
         typeof clip.title === 'string' &&
@@ -512,7 +538,7 @@ app.post('/detect-clips', async (req, res) => {
         clip.startTimeSeconds >= 0 &&
         clip.endTimeSeconds <= totalVideoDuration &&
         clip.startTimeSeconds < clip.endTimeSeconds &&
-        (clip.endTimeSeconds - clip.startTimeSeconds) >= 2 // Minimum 2 seconds final clip duration
+        (clip.endTimeSeconds - clip.startTimeSeconds) >= 2
     );
 
     if (finalSelectedClips.length === 0 && userDesiredCount > 0) {
@@ -522,12 +548,46 @@ app.post('/detect-clips', async (req, res) => {
 
     const clipsWithDownloadUrls = [];
     for (const clip of finalSelectedClips) {
+        // --- NEW LOGIC START: Adjust clip duration here for final output ---
+        let adjustedStartTime = clip.startTimeSeconds;
+        let adjustedEndTime = clip.endTimeSeconds;
+        const currentDuration = adjustedEndTime - adjustedStartTime;
+        const desiredTargetDuration = desiredClipDuration && typeof desiredClipDuration === 'number' ? desiredClipDuration : 30; // Use user's desired, or default to 30s
+
+        if (currentDuration > desiredTargetDuration) {
+            // Trim from end if too long
+            adjustedEndTime = adjustedStartTime + desiredTargetDuration;
+            console.log(`Trimmed clip "${clip.title}" from ${currentDuration.toFixed(2)}s to ${desiredTargetDuration.toFixed(2)}s.`);
+        } else if (currentDuration < desiredTargetDuration) {
+            // Extend to meet desired duration, if possible within total video
+            let potentialEndTime = adjustedStartTime + desiredTargetDuration;
+            if (potentialEndTime <= totalVideoDuration) {
+                adjustedEndTime = potentialEndTime;
+                console.log(`Extended clip "${clip.title}" from ${currentDuration.toFixed(2)}s to ${desiredTargetDuration.toFixed(2)}s.`);
+            } else {
+                // If can't extend fully, just go to end of video
+                adjustedEndTime = totalVideoDuration;
+                console.log(`Could not extend clip "${clip.title}" to ${desiredTargetDuration.toFixed(2)}s, extended to end of video.`);
+            }
+        }
+        // Ensure minimum duration (e.g., 2 seconds) even after trimming
+        if (adjustedEndTime - adjustedStartTime < 2) {
+            adjustedEndTime = adjustedStartTime + 2; // Force minimum 2 seconds
+            if (adjustedEndTime > totalVideoDuration) adjustedEndTime = totalVideoDuration; // Don't go past video end
+            console.warn(`Clip "${clip.title}" became too short after trimming, adjusted to minimum 2s.`);
+        }
+
+        // Update the clip object with adjusted times for FFmpeg
+        clip.startTimeSeconds = adjustedStartTime;
+        clip.endTimeSeconds = adjustedEndTime;
+        // --- NEW LOGIC END ---
+
         const sanitizedTitle = clip.title.replace(/[^a-zA-Z0-9.\-_]/g, '-').replace(/-+/g, '-').toLowerCase();
         const outputFileName = `${sanitizedTitle}_clip_${Date.now()}.mp4`;
         const outputFilePath = `clips/${outputFileName}`;
 
         try {
-            console.log(`[Batch Cutting] Cutting clip: "${clip.title}" (Start: ${clip.startTimeSeconds}s, End: ${clip.endTimeSeconds}s)`);
+            console.log(`[Batch Cutting] Cutting clip: "${clip.title}" (Start: ${clip.startTimeSeconds.toFixed(2)}s, End: ${clip.endTimeSeconds.toFixed(2)}s)`);
             await new Promise((resolve, reject) => {
                 const ffmpegCommand = `ffmpeg -i "${originalVideoTempPath}" -ss ${clip.startTimeSeconds} -to ${clip.endTimeSeconds} -c copy "${outputFilePath}"`;
                 exec(ffmpegCommand, (error, stdout, stderr) => {
