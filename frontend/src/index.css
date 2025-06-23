@@ -1,38 +1,18 @@
-:root {
-  font-family: system-ui, Avenir, Helvetica, Arial, sans-serif;
-  line-height: 1.5;
-  font-weight: 400;
-
-  color-scheme: light dark;
-  color: rgba(255, 255, 255, 0.87);
-  background-color: #242424;
-
-  font-synthesis: none;
-  text-rendering: optimizeLegibility;
-  -webkit-font-smoothing: antialiased;
-  -moz-osx-font-smoothing: grayscale;
-}
-
-a {
-  font-weight: 500;
-  color: #646cff;
-  text-decoration: inherit;
-}
-a:hover {
-  color: #535bf2;
-}
-
-body {
-  margin: 0;
-  display: flex;
-  place-items: center;
-  min-width: 320px;
-  min-height: 100vh;
+.app {
+  text-align: center;
+  font-family: Arial, sans-serif;
+  padding: 20px;
+  max-width: 600px;
+  margin: auto;
 }
 
 h1 {
-  font-size: 3.2em;
-  line-height: 1.1;
+  font-size: 28px;
+  margin-bottom: 20px;
+}
+
+input[type="file"] {
+  margin: 10px;
 }
 
 button {
@@ -54,6 +34,70 @@ button:focus-visible {
   outline: 4px auto -webkit-focus-ring-color;
 }
 
+/* --- NEW STYLES FOR CLIP OPTIONS --- */
+.clip-options-section {
+  border: 1px solid #ccc;
+  padding: 15px;
+  margin: 20px 0;
+  border-radius: 8px;
+  text-align: left;
+  background-color: #f9f9f9; /* Lighter background for the options box */
+  color: #333; /* Darker text for readability on light background */
+}
+
+.clip-options-section h3 {
+  margin-top: 0;
+  font-size: 18px;
+  color: #000; /* Even darker heading */
+}
+
+.clip-options-section label {
+  display: block;
+  margin-bottom: 8px;
+  font-size: 14px;
+}
+
+.clip-options-section input[type="radio"] {
+  margin-right: 8px;
+}
+
+.user-choice-controls {
+  margin-left: 25px;
+  margin-top: 10px;
+  padding: 10px;
+  border-left: 2px solid #eee;
+}
+
+.user-choice-controls label {
+  display: block;
+  margin-bottom: 10px;
+}
+
+.user-choice-controls select {
+  padding: 8px;
+  border-radius: 5px;
+  border: 1px solid #ddd;
+  margin-left: 5px;
+  background-color: #fff;
+  color: #333;
+}
+/* --- END NEW STYLES --- */
+
+
+textarea {
+  width: 100%;
+  margin-top: 10px;
+}
+
+ul {
+  text-align: left;
+  margin-top: 10px;
+}
+
+li {
+  margin-bottom: 8px;
+}
+
 @media (prefers-color-scheme: light) {
   :root {
     color: #213547;
@@ -64,5 +108,15 @@ button:focus-visible {
   }
   button {
     background-color: #f9f9f9;
+  }
+  /* Styles for light mode on the options section */
+  .clip-options-section {
+    background-color: #ffffff;
+  }
+  .clip-options-section h3 {
+    color: #213547;
+  }
+  .clip-options-section label {
+    color: #213547;
   }
 }

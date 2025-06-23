@@ -4,13 +4,16 @@ import './App.css';
 function App() {
   const [file, setFile] = useState(null);
   const [transcript, setTranscript] = useState('');
-  const [clips, setClips] = useState([]); // This will now directly hold clips with download URLs
+  const [clips, setClips] = useState([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
-  // uploadedVideoTempPath is still used to send to backend, but its primary purpose
-  // for frontend-triggered cutting is gone as cutting is now batched on backend.
   const [uploadedVideoTempPath, setUploadedVideoTempPath] = useState(null);
 
+  // --- NEW STATE FOR USER OPTIONS ---
+  const [clipOption, setClipOption] = useState('aiPick'); // 'aiPick' or 'userChoice'
+  const [desiredClipCount, setDesiredClipCount] = useState(3); // Default for user choice
+  const [desiredClipDuration, setDesiredClipDuration] = useState(30); // Default for user choice (in seconds)
+  // --- END NEW STATE ---
 
   const handleUpload = async () => {
     if (!file) {
@@ -22,7 +25,7 @@ function App() {
     setError('');
     setTranscript('');
     setClips([]);
-    setUploadedVideoTempPath(null); // Clear previous path for new upload
+    setUploadedVideoTempPath(null);
 
 
     const formData = new FormData();
@@ -38,14 +41,12 @@ function App() {
       const uploadData = await uploadResponse.json();
       if (!uploadResponse.ok) throw new Error(uploadData.error);
 
-      // Store the temporary path from backend's /upload response
       setUploadedVideoTempPath(uploadData.uploadedFilePath);
 
       console.log('Transcript received:', uploadData.fullTranscriptionData);
       setTranscript(uploadData.fullTranscriptionData.text);
 
       console.log('Requesting clip detection and batch cutting...');
-      // Frontend now sends full transcription data AND the temporary video path
       const detectClipsResponse = await fetch('http://localhost:5000/detect-clips', {
         method: 'POST',
         headers: {
@@ -53,15 +54,19 @@ function App() {
         },
         body: JSON.stringify({
             fullTranscriptionData: uploadData.fullTranscriptionData,
-            originalVideoTempPath: uploadData.uploadedFilePath // Send the path for backend to cut
+            originalVideoTempPath: uploadData.uploadedFilePath,
+            clipOption: clipOption,
+            desiredClipCount: desiredClipCount,
+            desiredClipDuration: desiredClipDuration
         }),
       });
 
+      // FIX HERE: Corrected variable name from detectClpsResponse to detectClipsResponse
       const clipsData = await detectClipsResponse.json();
       if (!detectClipsResponse.ok) throw new Error(clipsData.error);
 
       console.log('Detected and (attempted) cut clips:', clipsData.clips);
-      setClips(clipsData.clips); // Clips now directly contain download URLs
+      setClips(clipsData.clips);
 
     } catch (err) {
       console.error('Upload or clip processing error:', err.message);
@@ -71,7 +76,6 @@ function App() {
     }
   };
 
-  // Simplified handleDownloadClip: now just opens the URL
   const handleDownloadClip = (clip) => {
       if (clip.downloadUrl) {
           window.open(clip.downloadUrl, '_blank');
@@ -91,10 +95,74 @@ function App() {
     <div className="app">
       <h1>🎬 AI Video Clipper</h1>
 
-      <input type="file" accept="video/*" onChange={(e) => setFile(e.target.files[0])} disabled={loading} />
-      <button onClick={handleUpload} disabled={loading}>
-        {loading ? 'Processing...' : 'Upload & Auto-Cut Clips'}
-      </button>
+      <div className="input-section">
+        <input type="file" accept="video/*" onChange={(e) => setFile(e.target.files[0])} disabled={loading} />
+        <button onClick={handleUpload} disabled={loading}>
+          {loading ? 'Processing...' : 'Upload & Auto-Cut Clips'}
+        </button>
+      </div>
+
+      {/* --- NEW UI FOR CLIP OPTIONS --- */}
+      <div className="clip-options-section">
+        <h3>Clip Generation Options:</h3>
+        <div>
+          <label>
+            <input
+              type="radio"
+              value="aiPick"
+              checked={clipOption === 'aiPick'}
+              onChange={() => setClipOption('aiPick')}
+              disabled={loading}
+            />
+            AI's Best Pick (1-3 clips, default duration)
+          </label>
+        </div>
+        <div>
+          <label>
+            <input
+              type="radio"
+              value="userChoice"
+              checked={clipOption === 'userChoice'}
+              onChange={() => setClipOption('userChoice')}
+              disabled={loading}
+            />
+            User Choice:
+          </label>
+          {clipOption === 'userChoice' && (
+            <div className="user-choice-controls">
+              <label>
+                Number of Clips:
+                <select
+                  value={desiredClipCount}
+                  onChange={(e) => setDesiredClipCount(Number(e.target.value))}
+                  disabled={loading}
+                >
+                  {[1, 2, 3, 4, 5, 6, 7, 8, 9, 10].map(num => (
+                    <option key={num} value={num}>{num}</option>
+                  ))}
+                  <option value="max">Max AI picks</option> {/* Can add "Max AI picks" too */}
+                </select>
+              </label>
+              <label>
+                Duration (seconds per clip):
+                <select
+                  value={desiredClipDuration}
+                  onChange={(e) => setDesiredClipDuration(Number(e.target.value))}
+                  disabled={loading}
+                >
+                  <option value={10}>~10 seconds</option>
+                  <option value={20}>~20 seconds</option>
+                  <option value={30}>~30 seconds</option>
+                  <option value={45}>~45 seconds</option>
+                  <option value={60}>~60 seconds</option>
+                  <option value={90}>~90 seconds</option>
+                </select>
+              </label>
+            </div>
+          )}
+        </div>
+      </div>
+      {/* --- END NEW UI --- */}
 
       {loading && <p>Processing... please wait. This might take a moment for longer videos.</p>}
       {error && <p style={{ color: 'red' }}>Error: {error}</p>}
